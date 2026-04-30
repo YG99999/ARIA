@@ -168,19 +168,19 @@ fi
 PYVER=$("$PYTHON" --version 2>&1)
 log "Python: $PYVER ($PYTHON)"
 
-# venv support
-"$PYTHON" -m venv --help >> "$LOG_FILE" 2>&1 || {
-    warn "python3-venv missing — installing…"
-    case "$PKG_MGR" in
-        apt)
-            PYMINOR=$("$PYTHON" -c "import sys; print(sys.version_info.minor)")
-            pkg_install "python3.${PYMINOR}-venv" || pkg_install python3-venv
-            ;;
-        dnf|pacman)
-            pkg_install python3-venv
-            ;;
-    esac
-}
+# venv support — on Debian/Ubuntu, python3.X-venv must be installed separately.
+# `python3.X -m venv --help` returns 0 even when the package is missing, so we
+# always install the venv package proactively rather than relying on the help check.
+PYMINOR=$("$PYTHON" -c "import sys; print(sys.version_info.minor)")
+case "$PKG_MGR" in
+    apt)
+        pkg_install "python3.${PYMINOR}-venv" 2>/dev/null || \
+        pkg_install "python3-venv" 2>/dev/null || true
+        ;;
+    dnf|pacman)
+        pkg_install python3-venv 2>/dev/null || true
+        ;;
+esac
 
 # Playwright OS-level deps (Chromium headless)
 section "Installing Chromium system libraries"
@@ -237,7 +237,20 @@ section "Setting up Python environment"
 
 if [ ! -d "$VENV_DIR" ]; then
     info "Creating virtual environment…"
-    run "$PYTHON" -m venv "$VENV_DIR"
+    if ! "$PYTHON" -m venv "$VENV_DIR" >> "$LOG_FILE" 2>&1; then
+        warn "venv creation failed — installing python3-venv / python3-full and retrying…"
+        PYMINOR=$("$PYTHON" -c "import sys; print(sys.version_info.minor)")
+        case "$PKG_MGR" in
+            apt)
+                pkg_install "python3.${PYMINOR}-venv" "python3.${PYMINOR}-full" 2>/dev/null || \
+                pkg_install python3-venv python3-full 2>/dev/null || true
+                ;;
+            dnf|pacman)
+                pkg_install python3-venv 2>/dev/null || true
+                ;;
+        esac
+        run "$PYTHON" -m venv "$VENV_DIR"
+    fi
     log "Virtual environment created at $VENV_DIR"
 else
     log "Virtual environment already exists"
