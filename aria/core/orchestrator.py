@@ -413,7 +413,7 @@ class Orchestrator:
                 stream=True,
             ) as stream:
                 async for chunk in stream:
-                    delta = chunk.choices[0].delta.content or ""
+                    delta = chunk.choices[0].delta.content or "" if chunk.choices else ""
                     buffer += delta
                     now = asyncio.get_event_loop().time()
                     if sent_msg and now - last_edit > 1.0:
