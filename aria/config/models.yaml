@@ -1,0 +1,23 @@
+# Model configuration for ARIA
+# tier: light = fast/cheap model; heavy = capable/smart model
+# compress_at: token count at which context compression triggers (must be < context_limit - expected_response_tokens)
+# context_limit: model's actual context window
+
+models:
+  - id: anthropic/claude-haiku-4-5
+    tier: light
+    good_for: "routing, classification, summarization, fast decisions"
+    compress_at: 150000
+    context_limit: 200000
+
+  - id: anthropic/claude-sonnet-4-5
+    tier: heavy
+    good_for: "complex reasoning, coding, browser tasks, multi-step plans"
+    compress_at: 150000
+    context_limit: 200000
+
+# Budget limits (USD)
+budget:
+  daily_usd_alert: 2.00
+  daily_usd_hard_stop: 10.00
+  monthly_usd_hard_stop: 50.00

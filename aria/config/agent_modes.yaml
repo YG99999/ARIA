@@ -1,0 +1,34 @@
+# Agent mode presets — selected by router, appended to system prompt after persona.md
+# Each mode defines preferred tools, step budget, and a system prompt addendum.
+
+research_mode:
+  preferred_tools: [search_web, think, save_fact, search_memory, write_scratch, read_scratch]
+  step_budget: 20
+  system_prompt_addendum: |
+    You are in research mode. Prefer search_web for all information retrieval.
+    Only launch a browser if you need to interact with a page (click, fill, login).
+    Use think before drawing conclusions. Save important findings with save_fact.
+
+dev_mode:
+  preferred_tools: [run_shell_command, write_file, edit_file, read_file, list_directory, execute_python, think, write_scratch, read_scratch]
+  step_budget: 30
+  system_prompt_addendum: |
+    You are in dev mode. Write code, run tests, fix failures iteratively.
+    Use edit_file (str_replace) for modifications; write_file only for new files.
+    Run tests after every write. Fix and retry until exit 0 or max iterations.
+
+browser_mode:
+  preferred_tools: [browse, take_screenshot, mouse_click, keyboard_type, key_press, think, write_scratch, save_session_state, get_credential, request_approval, escalate]
+  step_budget: 25
+  system_prompt_addendum: |
+    You are in browser mode. Navigate carefully; prefer stored sessions over fresh logins.
+    Take a screenshot when uncertain about page state. Use think before irreversible actions.
+    Request approval before sending messages, spending money, or publishing content.
+
+analysis_mode:
+  preferred_tools: [search_memory, get_facts, think, execute_python, write_scratch, read_scratch, ingest_document]
+  step_budget: 15
+  system_prompt_addendum: |
+    You are in analysis mode. Use existing memory and documents first.
+    Execute Python for data processing or calculations. Think through reasoning before concluding.
+    Save key insights as facts for future reference.
