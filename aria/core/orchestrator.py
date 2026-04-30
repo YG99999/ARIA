@@ -184,12 +184,25 @@ class Orchestrator:
             await self._handle_file_message(msg)
 
     async def _handle_text_message(self, msg: Any) -> None:
+        """All non-command messages go through the agent. No exceptions.
+
+        Conversational messages → conversation_spec (memory + think, no shell/browser).
+        Tasks → appropriate spec based on router classification.
+        The agent's final reply IS the response — no separate streaming path.
+        """
         from tg.notify import send_text
         from core.router import classify, decompose_task, is_continuation_request
         from system.journal import log as journal_log
 
         text = msg.text
         await journal_log("message_in", text)
+
+        if self._budget_exceeded:
+            await send_text(
+                settings.telegram_chat_id,
+                "⛔ Daily LLM budget exhausted — no new tasks until tomorrow.",
+            )
+            return
 
         # Detect "continue from last time" — inject active session context
         if is_continuation_request(text):
@@ -207,39 +220,33 @@ class Orchestrator:
         title = classification.get("title", text[:60])
         complexity = classification.get("complexity", "simple")
 
-        if kind == "conversation" or kind == "meta":
-            # Direct LLM response (streamed)
-            await self._stream_conversational_response(text, msg)
-            return
+        is_conversational = kind in ("conversation", "meta")
 
-        if self._budget_exceeded:
-            await send_text(
-                settings.telegram_chat_id,
-                "⛔ Daily LLM budget exhausted — no new tasks until tomorrow.",
-            )
-            return
-
-        # Create task and dispatch
+        # Create task record
         task_id = await TaskRegistry.create(title=title, kind=kind, mode=mode)
 
+        if not is_conversational:
+            # Announce task so user knows work is starting
+            if kind == "mixed" or complexity == "complex":
+                await send_text(
+                    settings.telegram_chat_id,
+                    f"On it — breaking this into steps. [{task_id}]",
+                )
+            else:
+                await send_text(
+                    settings.telegram_chat_id,
+                    f"On it. [{task_id}]",
+                )
+
         if kind == "mixed" or complexity == "complex":
-            # Decompose into subtasks
             subtasks = await decompose_task(text)
-            await send_text(
-                settings.telegram_chat_id,
-                f"Task [{task_id}] decomposed into {len(subtasks)} subtask(s). Starting…",
-            )
             asyncio.create_task(
                 self._run_sequential_subtasks(task_id, title, subtasks, text),
                 name=f"task_{task_id}",
             )
         else:
-            await send_text(
-                settings.telegram_chat_id,
-                f"On it. [{task_id}] {title}",
-            )
             asyncio.create_task(
-                self._dispatch_single_task(task_id, text, mode),
+                self._dispatch_single_task(task_id, text, mode, silent=is_conversational),
                 name=f"task_{task_id}",
             )
 
@@ -263,7 +270,7 @@ class Orchestrator:
     # Task dispatch
     # ------------------------------------------------------------------
 
-    async def _dispatch_single_task(self, task_id: str, objective: str, mode: str) -> None:
+    async def _dispatch_single_task(self, task_id: str, objective: str, mode: str, silent: bool = False) -> None:
         from agents.specs import spec_for_mode
         from agents.worker import WorkerAgent
         from tg.notify import send_text
@@ -281,7 +288,11 @@ class Orchestrator:
             worker = WorkerAgent(spec, task_id)
             result = await worker.run()
 
-            await send_text(settings.telegram_chat_id, f"✅ [{task_id}] {result[:300]}")
+            # Conversational replies come through clean; task results get the ✅ prefix
+            if silent:
+                await send_text(settings.telegram_chat_id, result[:4096])
+            else:
+                await send_text(settings.telegram_chat_id, f"✅ [{task_id}] {result[:300]}")
             await journal_log("message_out", result, task_id=task_id)
 
             # Post-task self-reflection → sets verdict on task row
@@ -366,105 +377,6 @@ class Orchestrator:
             f"✅ [{parent_task_id}] All {len(subtasks)} subtasks complete.",
         )
         await TaskRegistry.update(parent_task_id, status="done")
-
-    # ------------------------------------------------------------------
-    # Streaming conversational response
-    # ------------------------------------------------------------------
-
-    async def _build_conversational_system_prompt(self, message: str) -> str:
-        """Stripped-down system prompt for conversational replies.
-
-        Omits tool descriptions on purpose — the conversational streaming call
-        does not pass tools= to the API, so the model would output tool-call
-        reasoning as plain text if it sees tool descriptions. Memory and persona
-        are still included.
-        """
-        persona_path = settings.aria_root / "config" / "persona.md"
-        persona = persona_path.read_text(encoding="utf-8") if persona_path.exists() else ""
-
-        memory_context = ""
-        try:
-            from memory.retriever import MemoryRetriever
-            memory_context = await MemoryRetriever.build_context(message)
-        except ImportError:
-            pass
-
-        parts = [SECURITY_BLOCK, persona, memory_context]
-        return "\n\n".join(p for p in parts if p)
-
-    async def _stream_conversational_response(self, text: str, msg: Any) -> None:
-        from tg.notify import send_text
-        from system.journal import log as journal_log
-        from core.llm_client import get_client, _record_usage
-
-        # Use conversational prompt — no tool descriptions to avoid reasoning bleed
-        system_prompt = await self._build_conversational_system_prompt(text)
-        client = get_client()
-
-        # Send initial placeholder
-        try:
-            sent_msg = await self._bot.app.bot.send_message(
-                settings.telegram_chat_id, "⏳"
-            )
-        except Exception:
-            sent_msg = None
-
-        buffer = ""
-        last_edit = 0.0
-
-        try:
-            from core.cost_guard import check as budget_check
-            await budget_check()
-
-            async with await client.chat.completions.create(
-                model=settings.get_model("heavy"),
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": tag(text, TrustLevel.OWNER)},
-                ],
-                max_tokens=1000,
-                stream=True,
-            ) as stream:
-                async for chunk in stream:
-                    delta = chunk.choices[0].delta.content or "" if chunk.choices else ""
-                    buffer += delta
-                    now = asyncio.get_event_loop().time()
-                    if sent_msg and now - last_edit > 1.0:
-                        try:
-                            await self._bot.app.bot.edit_message_text(
-                                (buffer + "▌")[:4096],
-                                settings.telegram_chat_id,
-                                sent_msg.message_id,
-                            )
-                            last_edit = now
-                        except Exception:
-                            pass
-
-            # Final edit — remove cursor, truncate to Telegram limit
-            if sent_msg and buffer:
-                try:
-                    await self._bot.app.bot.edit_message_text(
-                        buffer[:4096],
-                        settings.telegram_chat_id,
-                        sent_msg.message_id,
-                    )
-                    # If response was longer than 4096, send the rest as follow-up
-                    if len(buffer) > 4096:
-                        for i in range(4096, len(buffer), 4096):
-                            await send_text(settings.telegram_chat_id, buffer[i:i+4096])
-                except Exception:
-                    await send_text(settings.telegram_chat_id, buffer[:4096])
-            elif buffer:
-                await send_text(settings.telegram_chat_id, buffer[:4096])
-
-            await journal_log("message_out", buffer[:500])
-
-        except Exception:
-            logger.exception("Streaming response failed")
-            await send_text(
-                settings.telegram_chat_id,
-                "Sorry, I encountered an error generating a response.",
-            )
 
     # ------------------------------------------------------------------
     # System prompt builder

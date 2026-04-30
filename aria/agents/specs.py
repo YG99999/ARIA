@@ -154,6 +154,30 @@ def analysis_spec(objective: str, step_budget: int = 15) -> WorkerSpec:
     )
 
 
+def conversation_spec(objective: str, step_budget: int = 5) -> WorkerSpec:
+    """Spec for conversational replies and meta questions.
+
+    No shell or browser tools — just memory access and the ability to save facts.
+    The agent answers from its context, memory, and knowledge in one or two steps.
+    """
+    return WorkerSpec(
+        name="conversation_worker",
+        role="You are ARIA responding to the owner. Answer directly from your knowledge and memory. Be concise.",
+        objective=objective,
+        allowed_tools=[
+            "search_memory",
+            "get_facts",
+            "save_fact",
+            "think",
+        ],
+        constraints=[
+            "Answer directly. Do not use tools unless you need to look something up.",
+            "One reply. No follow-up questions unless genuinely needed.",
+        ],
+        step_budget=step_budget,
+    )
+
+
 def spec_for_mode(mode: str, objective: str) -> WorkerSpec:
     """Map a router mode string to the appropriate convenience spec."""
     mapping = {
@@ -161,6 +185,7 @@ def spec_for_mode(mode: str, objective: str) -> WorkerSpec:
         "browser_mode": browser_spec,
         "research_mode": research_spec,
         "analysis_mode": analysis_spec,
+        "conversation": conversation_spec,
     }
     fn = mapping.get(mode, shell_spec)
     return fn(objective)
