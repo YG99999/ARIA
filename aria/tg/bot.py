@@ -15,7 +15,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any
 
-from telegram import Update
+from telegram import Update, BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -174,11 +174,52 @@ class TelegramBot:
     # Lifecycle
     # ------------------------------------------------------------------
 
+    async def _set_command_menu(self) -> None:
+        """Register slash commands so they appear in Telegram's / menu."""
+        commands = [
+            BotCommand("status", "What am I doing right now?"),
+            BotCommand("tasks", "List recent tasks"),
+            BotCommand("task", "Full detail for a task: /task [id]"),
+            BotCommand("stop", "Stop a running task: /stop [id]"),
+            BotCommand("approve", "Approve a pending action: /approve [id]"),
+            BotCommand("deny", "Deny a pending action: /deny [id]"),
+            BotCommand("approvals", "List all pending approvals"),
+            BotCommand("memory", "Show what ARIA remembers"),
+            BotCommand("recall", "Search memory: /recall [term]"),
+            BotCommand("journal", "Recent log entries or search: /journal [n|term]"),
+            BotCommand("health", "System vitals and LLM reachability"),
+            BotCommand("schedule", "Scheduled jobs"),
+            BotCommand("pause", "Pause all task dispatch"),
+            BotCommand("resume", "Resume task dispatch"),
+            BotCommand("budget", "Today's LLM spend vs limits"),
+            BotCommand("skills", "Loaded skill files"),
+            BotCommand("skill", "Skill detail or toggle: /skill [name] [disable|enable]"),
+            BotCommand("accounts", "Saved credentials (no secrets shown)"),
+            BotCommand("docs", "Ingested documents"),
+            BotCommand("session", "Active session info"),
+            BotCommand("dream", "Last dream cycle summary"),
+            BotCommand("why", "Plain-English explanation of a task: /why [id]"),
+            BotCommand("retry", "Restart task from a checkpoint: /retry [id] [step]"),
+            BotCommand("rollback", "Git revert last N commits: /rollback [n]"),
+            BotCommand("backup", "Download data backup as zip"),
+            BotCommand("logs", "Raw log file tail: /logs [n]"),
+            BotCommand("trust", "Recent injection detection events"),
+            BotCommand("mode", "Switch UX mode: /mode [beginner|expert]"),
+            BotCommand("briefing", "Morning briefing: /briefing [on|off] [hour]"),
+            BotCommand("help", "All commands and usage"),
+        ]
+        try:
+            await self.app.bot.set_my_commands(commands)
+            logger.info("Telegram command menu registered (%d commands)", len(commands))
+        except Exception:
+            logger.warning("Failed to set Telegram command menu", exc_info=True)
+
     async def run(self) -> None:
         """Start Telegram polling loop. Runs until cancelled."""
         logger.info("Starting Telegram polling")
         async with self.app:
             await self.app.start()
+            await self._set_command_menu()
             await self.app.updater.start_polling(drop_pending_updates=True)
             try:
                 # Keep running until cancelled

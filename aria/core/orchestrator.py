@@ -78,10 +78,6 @@ class Orchestrator:
                 f"Say 'retry [title]' to requeue any of them.",
             )
 
-        # First-run: ask about sub-agent models if not yet configured
-        await self._maybe_ask_about_models()
-
-
         while self._running:
             try:
                 self._last_tick_time = time.time()
@@ -194,19 +190,6 @@ class Orchestrator:
 
         text = msg.text
         await journal_log("message_in", text)
-
-        # Check if this is a model config message — JSON blob OR natural language add/update
-        _lower = text.lower()
-        _is_model_request = any(p in _lower for p in (
-            "add model", "add a model", "configure model", "setup model",
-            "set up model", "new model", "update models", "change model",
-            "add subagent", "add sub-agent", "add agent model",
-        ))
-        if _is_model_request:
-            from memory.facts import FactsStore
-            await FactsStore.upsert("models_onboarding_pending", "1", source="aria")
-        if await self._handle_models_onboarding_reply(text):
-            return  # consumed — don't route as a normal message
 
         # Detect "continue from last time" — inject active session context
         if is_continuation_request(text):
