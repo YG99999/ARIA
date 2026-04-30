@@ -44,11 +44,29 @@ def _write_env(values: dict[str, str]) -> None:
 def _step_telegram() -> dict[str, str]:
     print("\n[1/7] Telegram configuration")
     print("  Create a bot at https://t.me/BotFather if you haven't already.")
-    token = _prompt("  Bot token", secret=True)
-    print("  Send any message to your bot, then visit:")
-    print("  https://api.telegram.org/bot<TOKEN>/getUpdates")
-    chat_id = _prompt("  Your chat_id (numeric)")
-    return {"TELEGRAM_TOKEN": token, "TELEGRAM_CHAT_ID": chat_id}
+    print("  BotFather gives you a token like:  1234567890:ABCdef...")
+    print()
+
+    token = ""
+    while not token.strip():
+        token = _prompt("  Bot token (required)", secret=True)
+        if not token.strip():
+            print("  Token is required — paste it from BotFather.")
+
+    print()
+    print("  Now find your chat ID:")
+    print("  1. Send any message to your bot in Telegram")
+    print("  2. Visit: https://api.telegram.org/bot" + token[:20] + ".../getUpdates")
+    print("  3. Copy the 'id' number from the 'chat' object")
+    print()
+
+    chat_id = ""
+    while not chat_id.strip().lstrip("-").isdigit():
+        chat_id = _prompt("  Your chat_id (numeric, e.g. 123456789)")
+        if not chat_id.strip().lstrip("-").isdigit():
+            print("  Must be a number.")
+
+    return {"TELEGRAM_TOKEN": token.strip(), "TELEGRAM_CHAT_ID": chat_id.strip()}
 
 
 def _step_llm() -> tuple[dict[str, str], str]:
@@ -212,19 +230,25 @@ WantedBy=multi-user.target
 
 def _step_git_init() -> None:
     if sys.platform == "win32":
-        print("\n[6/7] Git init — skipped on Windows (do this manually if needed)")
+        print("\n[6/7] Git init — skipped on Windows")
+        return
+    if _is_wsl():
+        print("\n[6/7] Git init — skipped on WSL (rollback not needed here)")
         return
     print("\n[6/7] Initializing git repository for rollback support")
     aria_root = str(_ARIA_ROOT.resolve())
     if not (_ARIA_ROOT / ".git").exists():
-        os.system(f"git -C {aria_root} init")
+        # Configure a local git identity so commit doesn't fail on bare machines
+        os.system(f"git -C {aria_root} init -b main")
+        os.system(f'git -C {aria_root} config user.email "aria@localhost"')
+        os.system(f'git -C {aria_root} config user.name "ARIA"')
         (_ARIA_ROOT / ".gitignore").write_text(
             ".env\ndata/.secrets_key\ndata/\n__pycache__/\n*.pyc\n",
             encoding="utf-8",
         )
         os.system(f"git -C {aria_root} add -A")
-        os.system(f'git -C {aria_root} commit -m "initial"')
-        print("  Git repository initialized")
+        os.system(f'git -C {aria_root} commit -m "initial" -q')
+        print("  Git repository initialized (for /rollback support)")
     else:
         print("  Git repository already exists")
 
@@ -284,10 +308,16 @@ def run_wizard() -> None:
 
     print("\n" + "=" * 60)
     print("  Setup complete!")
-    print("  Start ARIA with: python main.py")
-    if sys.platform != "win32":
-        print("  Or via systemd:  systemctl start aria")
     print("=" * 60)
+    print()
+    print("  Starting ARIA now…")
+    print("  (Check your Telegram — ARIA will send you a message)")
+    print()
+    print("  Press Ctrl+C any time to stop.")
+    print()
+
+    # Launch ARIA immediately — no need to run a second command
+    os.execv(sys.executable, [sys.executable, str(_ARIA_ROOT / "main.py")])
 
 
 def _save_initial_facts(user_facts: dict[str, str], ux_mode: str) -> None:
