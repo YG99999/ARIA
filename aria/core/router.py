@@ -102,9 +102,16 @@ def _extract_json(text: str) -> dict | None:
 async def classify(message: str) -> dict:
     """Classify a message using the LLM. Retries with a simpler prompt if needed.
 
-    Never falls back to keyword matching — ARIA routes by intelligence only.
+    The router only sees the first 500 chars — enough to classify intent without
+    being confused by large payloads (JSON blobs, code, etc.).
+
+    If both LLM attempts fail, default to 'shell' (dispatch an agent with tools)
+    rather than 'conversation' (no tools). An agent can always answer a question;
+    the conversational path cannot run a task.
     """
     model = settings.get_model(ROUTER_MODEL_TIER)
+    # Truncate for routing — we classify intent, not content
+    snippet = message[:500]
     title = message[:60]
 
     # Attempt 1: full classification prompt
@@ -113,7 +120,7 @@ async def classify(message: str) -> dict:
             model=model,
             messages=[
                 {"role": "system", "content": _CLASSIFY_SYSTEM},
-                {"role": "user", "content": message},
+                {"role": "user", "content": snippet},
             ],
             max_tokens=200,
             temperature=0.0,
@@ -129,9 +136,9 @@ async def classify(message: str) -> dict:
     except Exception:
         logger.debug("Router attempt 1 failed", exc_info=True)
 
-    # Attempt 2: simpler yes/no prompt — model may not follow strict JSON format
+    # Attempt 2: simpler binary prompt — model may not follow strict JSON format
     try:
-        retry_prompt = _RETRY_SYSTEM.format(message=message[:300], title=title)
+        retry_prompt = _RETRY_SYSTEM.format(message=snippet, title=title)
         response = await llm_call(
             model=model,
             messages=[{"role": "user", "content": retry_prompt}],
@@ -150,15 +157,16 @@ async def classify(message: str) -> dict:
     except Exception:
         logger.debug("Router attempt 2 failed", exc_info=True)
 
-    # Both LLM attempts failed — log it prominently and default to conversation.
-    # This should only happen if the API is down or returning garbage.
+    # Both LLM attempts failed. Default to shell so an agent with tools handles it.
+    # An agent can answer questions; the conversational path cannot run tasks.
+    # This only happens when the API is down or returning completely garbled output.
     logger.error(
-        "Router LLM failed on both attempts for message: %r — defaulting to conversation. "
-        "Check API connectivity and model availability.", message[:100]
+        "Router LLM failed on both attempts for: %r — dispatching as shell task. "
+        "Check API connectivity.", message[:100]
     )
     return {
-        "kind": "conversation",
-        "mode": "conversation",
+        "kind": "shell",
+        "mode": "dev_mode",
         "title": title,
         "complexity": "simple",
     }
