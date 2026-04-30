@@ -14,6 +14,18 @@ import aiosqlite
 
 logger = logging.getLogger(__name__)
 
+
+def fts5_escape(query: str) -> str:
+    """Wrap a user-supplied string in FTS5 phrase-quote syntax.
+
+    FTS5 MATCH treats bare words like 'models' as potential column names,
+    colons as column filters, *, -, AND/OR/NOT as operators, etc.
+    Wrapping in double-quotes forces a literal phrase search and avoids
+    'no such column: X' errors when the query contains any special tokens.
+    """
+    return '"' + query[:200].replace('"', '""') + '"'
+
+
 # ------------------------------------------------------------------
 # Database wrapper
 # ------------------------------------------------------------------

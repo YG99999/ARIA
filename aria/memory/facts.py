@@ -53,14 +53,17 @@ class FactsStore:
 
     @staticmethod
     async def search(query: str, limit: int = 10) -> list[dict]:
-        from core.database import memory_db
+        from core.database import memory_db, fts5_escape
 
-        rows = await memory_db.fetchall(
-            "SELECT f.key, f.value, f.importance FROM facts_fts ft "
-            "JOIN facts f ON f.rowid = ft.rowid "
-            "WHERE facts_fts MATCH ? LIMIT ?",
-            (query, limit),
-        )
+        try:
+            rows = await memory_db.fetchall(
+                "SELECT f.key, f.value, f.importance FROM facts_fts ft "
+                "JOIN facts f ON f.rowid = ft.rowid "
+                "WHERE facts_fts MATCH ? LIMIT ?",
+                (fts5_escape(query), limit),
+            )
+        except Exception:
+            rows = []
         return [dict(r) for r in rows]
 
     @staticmethod

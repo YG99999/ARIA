@@ -768,15 +768,9 @@ class Orchestrator:
                     titles_str = ", ".join(r["title"][:40] for r in task_rows)
                     from core.llm_client import llm_call
                     from core.config import settings as s
-                    import openai
 
-                    client = openai.AsyncOpenAI(
-                        api_key=s.llm_api_key,
-                        base_url=s.llm_base_url,
-                    )
                     resp = await llm_call(
-                        client,
-                        model=s.get_model("fast"),
+                        model=s.get_model("light"),
                         messages=[
                             {
                                 "role": "user",
@@ -886,7 +880,6 @@ class Orchestrator:
         try:
             from tg.notify import send_text
             from core.llm_client import llm_call
-            from openai import AsyncOpenAI
             import yaml
             from pathlib import Path
 
@@ -904,10 +897,6 @@ class Orchestrator:
                 return True
 
             # Ask the LLM to parse the user's model descriptions into structured yaml
-            client = AsyncOpenAI(
-                base_url=settings.llm_base_url,
-                api_key=settings.llm_api_key,
-            )
             existing_model = settings.get_model("heavy")
 
             parse_prompt = f"""The user wants to configure additional AI models for ARIA.
@@ -938,7 +927,6 @@ Example output:
   context_limit: 128000"""
 
             response = await llm_call(
-                client,
                 model=existing_model,
                 messages=[{"role": "user", "content": parse_prompt}],
                 max_tokens=500,

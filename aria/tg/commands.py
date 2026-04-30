@@ -309,13 +309,17 @@ async def cmd_journal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         rows = list(reversed(rows))
     elif args:
+        from core.database import fts5_escape
         term = " ".join(args)
-        rows = await journal_db.fetchall(
-            "SELECT j.type, j.content, j.task_id, j.created_at "
-            "FROM journal_fts f JOIN journal j ON j.id = f.rowid "
-            "WHERE journal_fts MATCH ? ORDER BY j.id DESC LIMIT 20",
-            (term,),
-        )
+        try:
+            rows = await journal_db.fetchall(
+                "SELECT j.type, j.content, j.task_id, j.created_at "
+                "FROM journal_fts f JOIN journal j ON j.id = f.rowid "
+                "WHERE journal_fts MATCH ? ORDER BY j.id DESC LIMIT 20",
+                (fts5_escape(term),),
+            )
+        except Exception:
+            rows = []
     else:
         rows = await journal_db.fetchall(
             "SELECT type, content, task_id, created_at FROM journal ORDER BY id DESC LIMIT 10"
@@ -397,13 +401,16 @@ async def cmd_recall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     term = " ".join(args)
     results: list[str] = []
 
+    from core.database import fts5_escape
+    safe_term = fts5_escape(term)
+
     # 1. Facts — FTS5
     try:
         rows = await memory_db.fetchall(
             "SELECT f.key, f.value FROM facts_fts ft "
             "JOIN facts f ON f.rowid = ft.rowid "
             "WHERE facts_fts MATCH ? LIMIT 5",
-            (term,),
+            (safe_term,),
         )
         for r in rows:
             results.append(f"  [fact] {r['key']}: {r['value'][:100]}")
@@ -416,7 +423,7 @@ async def cmd_recall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             "SELECT h.title, h.summary FROM history_fts ft "
             "JOIN history h ON h.rowid = ft.rowid "
             "WHERE history_fts MATCH ? LIMIT 5",
-            (term,),
+            (safe_term,),
         )
         for r in rows:
             results.append(f"  [history] {r['title']}: {r['summary'][:100]}")

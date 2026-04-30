@@ -80,18 +80,25 @@ async def save_fact(key: str, value: str, importance: str = "normal", **kwargs) 
     },
 )
 async def search_memory(query: str, **kwargs) -> str:
-    from core.database import memory_db
+    from core.database import memory_db, fts5_escape
 
-    facts = await memory_db.fetchall(
-        "SELECT f.key, f.value FROM facts_fts ft JOIN facts f ON f.rowid = ft.rowid "
-        "WHERE facts_fts MATCH ? LIMIT 5",
-        (query,),
-    )
-    history = await memory_db.fetchall(
-        "SELECT h.title, h.summary FROM history_fts hft JOIN history h ON h.id = hft.rowid "
-        "WHERE history_fts MATCH ? LIMIT 3",
-        (query,),
-    )
+    safe_query = fts5_escape(query)
+    try:
+        facts = await memory_db.fetchall(
+            "SELECT f.key, f.value FROM facts_fts ft JOIN facts f ON f.rowid = ft.rowid "
+            "WHERE facts_fts MATCH ? LIMIT 5",
+            (safe_query,),
+        )
+    except Exception:
+        facts = []
+    try:
+        history = await memory_db.fetchall(
+            "SELECT h.title, h.summary FROM history_fts hft JOIN history h ON h.id = hft.rowid "
+            "WHERE history_fts MATCH ? LIMIT 3",
+            (safe_query,),
+        )
+    except Exception:
+        history = []
 
     lines = []
     if facts:

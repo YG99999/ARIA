@@ -26,12 +26,18 @@ class HistoryStore:
     async def search(query: str, limit: int = 3) -> list[dict]:
         from core.database import memory_db
 
-        rows = await memory_db.fetchall(
-            "SELECT h.title, h.summary, h.outcome, h.created_at "
-            "FROM history_fts hft JOIN history h ON h.id = hft.rowid "
-            "WHERE history_fts MATCH ? ORDER BY h.id DESC LIMIT ?",
-            (query, limit),
-        )
+        # FTS5 MATCH interprets colons, quotes, *, etc. as syntax.
+        # Wrap in double-quotes to force a literal phrase search.
+        safe_query = '"' + query[:200].replace('"', '""') + '"'
+        try:
+            rows = await memory_db.fetchall(
+                "SELECT h.title, h.summary, h.outcome, h.created_at "
+                "FROM history_fts hft JOIN history h ON h.id = hft.rowid "
+                "WHERE history_fts MATCH ? ORDER BY h.id DESC LIMIT ?",
+                (safe_query, limit),
+            )
+        except Exception:
+            rows = []  # FTS5 syntax error — return empty rather than crashing
         return [dict(r) for r in rows]
 
     @staticmethod

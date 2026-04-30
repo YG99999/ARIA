@@ -46,14 +46,17 @@ async def tail(n: int = 20) -> list[dict]:
 
 async def search(query: str, limit: int = 20) -> list[dict]:
     """FTS5 full-text search over journal content."""
-    from core.database import journal_db
+    from core.database import journal_db, fts5_escape
 
-    rows = await journal_db.fetchall(
-        "SELECT j.id, j.type, j.content, j.task_id, j.tag, j.created_at "
-        "FROM journal_fts f JOIN journal j ON j.id = f.rowid "
-        "WHERE journal_fts MATCH ? ORDER BY j.id DESC LIMIT ?",
-        (query, limit),
-    )
+    try:
+        rows = await journal_db.fetchall(
+            "SELECT j.id, j.type, j.content, j.task_id, j.tag, j.created_at "
+            "FROM journal_fts f JOIN journal j ON j.id = f.rowid "
+            "WHERE journal_fts MATCH ? ORDER BY j.id DESC LIMIT ?",
+            (fts5_escape(query), limit),
+        )
+    except Exception:
+        rows = []
     return [dict(r) for r in rows]
 
 

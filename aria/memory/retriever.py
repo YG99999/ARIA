@@ -80,11 +80,12 @@ class MemoryRetriever:
         if budget > 300:
             try:
                 from core.database import memory_db
+                from core.database import fts5_escape
                 doc_rows = await memory_db.fetchall(
                     "SELECT dc.doc_name, dc.content "
                     "FROM doc_chunks_fts ft JOIN doc_chunks dc ON dc.id = ft.rowid "
                     "WHERE doc_chunks_fts MATCH ? LIMIT 3",
-                    (query,),
+                    (fts5_escape(query),),
                 )
                 if doc_rows:
                     doc_lines = ["Relevant document extracts:"]
