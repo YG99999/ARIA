@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# ARIA — One-Line Installer
+# ARIA — One-Line Installer (idempotent — safe to re-run at any time)
 #
 # Usage (paste this into your terminal):
 #
-#   bash <(curl -fsSL https://raw.githubusercontent.com/YOUR_USER/ARIA/main/install.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/YG99999/ARIA/main/install.sh)
 #
 # Works on: Raspberry Pi OS, Debian, Ubuntu, and most apt-based Linux distros.
 # Run as a normal user with sudo access — do NOT run as root.
+#
+# Re-run any time: already-completed steps are detected and skipped.
+# If a previous run failed mid-way, it resumes from that point.
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -19,6 +22,10 @@ PYTHON_MIN_MAJOR=3
 PYTHON_MIN_MINOR=10
 LOG_FILE="/tmp/aria_install.log"
 
+# Progress state — persists across runs so we never redo completed work.
+# Stored in the home dir so it survives even if INSTALL_DIR gets wiped.
+STATE_FILE="$HOME/.aria_install_state"
+
 # ── Colours ───────────────────────────────────────────────────────────────────
 BOLD="\033[1m"
 GREEN="\033[0;32m"
@@ -29,11 +36,20 @@ DIM="\033[2m"
 NC="\033[0m"
 
 log()     { echo -e "${GREEN}✔${NC}  $*"; }
+skip()    { echo -e "${DIM}✔  $* (already done)${NC}"; }
 info()    { echo -e "${CYAN}→${NC}  $*"; }
 warn()    { echo -e "${YELLOW}⚠${NC}  $*"; }
 die()     { echo -e "${RED}✘${NC}  $*" >&2; echo "    See $LOG_FILE for details." >&2; exit 1; }
 section() { echo -e "\n${BOLD}${CYAN}── $* ──${NC}"; }
 run()     { "$@" >> "$LOG_FILE" 2>&1 || die "Command failed: $*"; }
+
+# ── Progress tracking ─────────────────────────────────────────────────────────
+# step_done STEP   — true if step was previously completed
+# mark_done STEP   — record step as completed
+# clear_step STEP  — remove a step (force redo on next run)
+step_done() { grep -qxF "$1" "$STATE_FILE" 2>/dev/null; }
+mark_done() { echo "$1" >> "$STATE_FILE"; }
+clear_step() { sed -i "/^${1}$/d" "$STATE_FILE" 2>/dev/null || true; }
 
 # ── Stdin guard ───────────────────────────────────────────────────────────────
 # If stdin is not a terminal the script was piped in (curl ... | bash).
@@ -43,10 +59,8 @@ if [ ! -t 0 ]; then
     echo "  ARIA installer — re-launching with interactive stdin..."
     echo ""
     TMP=$(mktemp /tmp/aria_install_XXXXXX.sh)
-    # Read ourselves from the pipe into a temp file
     cat > "$TMP"
     chmod +x "$TMP"
-    # Re-exec with stdin from the terminal
     exec bash "$TMP" < /dev/tty
 fi
 
@@ -59,11 +73,13 @@ echo "  ║              One-Line Installer              ║"
 echo "  ╚══════════════════════════════════════════════╝"
 echo -e "${NC}"
 echo "  Install directory : $INSTALL_DIR"
+echo "  Progress file     : $STATE_FILE"
 echo "  Log file          : $LOG_FILE"
 echo ""
 
-# Wipe old log
-> "$LOG_FILE"
+# Append to log across runs — don't wipe it, so failures are traceable.
+echo "" >> "$LOG_FILE"
+echo "=== ARIA install run: $(date) ===" >> "$LOG_FILE"
 
 # ── Root check ────────────────────────────────────────────────────────────────
 if [ "$EUID" -eq 0 ]; then
@@ -95,7 +111,7 @@ if grep -qi "raspberry" /proc/cpuinfo 2>/dev/null || \
     log "Raspberry Pi detected"
 fi
 
-# ── System package helper ─────────────────────────────────────────────────────
+# ── System package helpers ────────────────────────────────────────────────────
 pkg_install() {
     case "$PKG_MGR" in
         apt)    sudo apt-get install -y "$@" ;;
@@ -112,20 +128,39 @@ pkg_update() {
     esac >> "$LOG_FILE" 2>&1
 }
 
-# ── Install system dependencies ───────────────────────────────────────────────
-section "Installing system dependencies"
+# Check if a single apt package is already installed (apt only; no-op on others)
+apt_installed() {
+    [ "$PKG_MGR" != "apt" ] && return 1
+    dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
+}
 
-info "Updating package index…"
-pkg_update
+# ── Step 1: Update package index ─────────────────────────────────────────────
+section "System dependencies"
 
-# Core tools
-CORE_PKGS=(curl git)
-info "Ensuring core tools (curl, git)…"
-pkg_install "${CORE_PKGS[@]}"
-log "Core tools ready"
+if step_done "pkg_updated"; then
+    skip "Package index already updated"
+else
+    info "Updating package index…"
+    pkg_update
+    mark_done "pkg_updated"
+    log "Package index updated"
+fi
 
-# Python 3.10+
-section "Checking Python version"
+# ── Step 2: Core tools (curl, git) ───────────────────────────────────────────
+NEED_CORE=()
+command -v curl &>/dev/null || NEED_CORE+=(curl)
+command -v git  &>/dev/null || NEED_CORE+=(git)
+
+if [ ${#NEED_CORE[@]} -eq 0 ]; then
+    skip "Core tools (curl, git) already installed"
+else
+    info "Installing: ${NEED_CORE[*]}…"
+    pkg_install "${NEED_CORE[@]}"
+    log "Core tools installed"
+fi
+
+# ── Step 3: Python 3.10+ ──────────────────────────────────────────────────────
+section "Python"
 
 find_python() {
     for cmd in python3.13 python3.12 python3.11 python3.10 python3; do
@@ -133,8 +168,7 @@ find_python() {
             ver=$("$cmd" -c "import sys; print(sys.version_info.minor)" 2>/dev/null || echo 0)
             maj=$("$cmd" -c "import sys; print(sys.version_info.major)" 2>/dev/null || echo 0)
             if [ "$maj" -ge "$PYTHON_MIN_MAJOR" ] && [ "$ver" -ge "$PYTHON_MIN_MINOR" ]; then
-                echo "$cmd"
-                return
+                echo "$cmd"; return
             fi
         fi
     done
@@ -142,11 +176,13 @@ find_python() {
 
 PYTHON=$(find_python || true)
 
-if [ -z "$PYTHON" ]; then
+if [ -n "$PYTHON" ]; then
+    PYVER=$("$PYTHON" --version 2>&1)
+    log "Python: $PYVER ($PYTHON)"
+else
     warn "Python ${PYTHON_MIN_MAJOR}.${PYTHON_MIN_MINOR}+ not found — installing…"
     case "$PKG_MGR" in
         apt)
-            # Try deadsnakes PPA on Ubuntu; plain apt on Debian/Pi
             if command -v add-apt-repository &>/dev/null; then
                 sudo add-apt-repository -y ppa:deadsnakes/ppa >> "$LOG_FILE" 2>&1 || true
                 pkg_update
@@ -154,169 +190,249 @@ if [ -z "$PYTHON" ]; then
             pkg_install python3.11 python3.11-venv python3.11-dev python3-pip || \
             pkg_install python3 python3-venv python3-dev python3-pip
             ;;
-        dnf)
-            pkg_install python3.11 python3-pip python3-venv
-            ;;
-        pacman)
-            pkg_install python python-pip
-            ;;
+        dnf)  pkg_install python3.11 python3-pip python3-venv ;;
+        pacman) pkg_install python python-pip ;;
     esac
     PYTHON=$(find_python || true)
     [ -n "$PYTHON" ] || die "Could not install Python ${PYTHON_MIN_MAJOR}.${PYTHON_MIN_MINOR}+. Install it manually and re-run."
+    PYVER=$("$PYTHON" --version 2>&1)
+    log "Python installed: $PYVER"
 fi
 
-PYVER=$("$PYTHON" --version 2>&1)
-log "Python: $PYVER ($PYTHON)"
-
-# venv support — on Debian/Ubuntu, python3.X-venv must be installed separately.
-# `python3.X -m venv --help` returns 0 even when the package is missing, so we
-# always install the venv package proactively rather than relying on the help check.
 PYMINOR=$("$PYTHON" -c "import sys; print(sys.version_info.minor)")
-case "$PKG_MGR" in
-    apt)
-        pkg_install "python3.${PYMINOR}-venv" 2>/dev/null || \
-        pkg_install "python3-venv" 2>/dev/null || true
-        ;;
-    dnf|pacman)
-        pkg_install python3-venv 2>/dev/null || true
-        ;;
-esac
 
-# Playwright OS-level deps (Chromium headless)
-section "Installing Chromium system libraries"
-case "$PKG_MGR" in
-    apt)
-        CHROMIUM_DEPS=(
-            libnspr4 libnss3 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0
-            libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1
-            libxfixes3 libxrandr2 libgbm1 libxshmfence1
-            libasound2 libpango-1.0-0 libpangocairo-1.0-0
-            fonts-liberation xdg-utils
-        )
-        # libasound2 was renamed on Debian 12+
-        pkg_install "${CHROMIUM_DEPS[@]}" 2>/dev/null || \
-        pkg_install libasound2t64 "${CHROMIUM_DEPS[@]:1}" 2>/dev/null || true
-        ;;
-    dnf)
-        pkg_install nss atk at-spi2-atk cups-libs libdrm libxkbcommon \
-                    libXcomposite libXdamage libXrandr mesa-libgbm alsa-lib pango || true
-        ;;
-    pacman)
-        pkg_install nss atk at-spi2-atk libcups libdrm libxkbcommon \
-                    libxcomposite libxdamage libxrandr mesa alsa-lib pango || true
-        ;;
-esac
-log "Chromium system libraries installed"
-
-# Raspberry Pi: virtual display for headless browser
-if [ "$IS_PI" = true ]; then
-    info "Raspberry Pi: installing Xvfb for headless display…"
-    pkg_install xvfb x11vnc || true
-    log "Xvfb installed (virtual display for headless Chromium)"
+# ── Step 4: python3.X-venv ───────────────────────────────────────────────────
+# On Debian/Ubuntu, python3.X-venv is a separate package. `python3.X -m venv --help`
+# returns 0 even when it's missing, so we check by attempting to create a test venv.
+if step_done "venv_pkg_installed"; then
+    skip "python3.${PYMINOR}-venv already confirmed"
+else
+    if "$PYTHON" -m venv --without-pip /tmp/aria_venv_test >> "$LOG_FILE" 2>&1; then
+        rm -rf /tmp/aria_venv_test
+        mark_done "venv_pkg_installed"
+        log "python3.${PYMINOR}-venv confirmed present"
+    else
+        rm -rf /tmp/aria_venv_test
+        info "Installing python3.${PYMINOR}-venv…"
+        case "$PKG_MGR" in
+            apt)
+                pkg_install "python3.${PYMINOR}-venv" "python3.${PYMINOR}-full" 2>/dev/null || \
+                pkg_install python3-venv python3-full 2>/dev/null || true
+                ;;
+            dnf|pacman) pkg_install python3-venv 2>/dev/null || true ;;
+        esac
+        mark_done "venv_pkg_installed"
+        log "python3.${PYMINOR}-venv installed"
+    fi
 fi
 
-# ── Clone or update the repo ──────────────────────────────────────────────────
+# ── Step 5: Chromium system libraries ────────────────────────────────────────
+section "Chromium system libraries"
+
+if step_done "chromium_libs_installed"; then
+    skip "Chromium system libraries already installed"
+else
+    case "$PKG_MGR" in
+        apt)
+            CHROMIUM_DEPS=(
+                libnspr4 libnss3 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0
+                libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1
+                libxfixes3 libxrandr2 libgbm1 libxshmfence1
+                libasound2 libpango-1.0-0 libpangocairo-1.0-0
+                fonts-liberation xdg-utils
+            )
+            # libasound2 was renamed on Debian 12+
+            pkg_install "${CHROMIUM_DEPS[@]}" 2>/dev/null || \
+            pkg_install libasound2t64 "${CHROMIUM_DEPS[@]:1}" 2>/dev/null || true
+            ;;
+        dnf)
+            pkg_install nss atk at-spi2-atk cups-libs libdrm libxkbcommon \
+                        libXcomposite libXdamage libXrandr mesa-libgbm alsa-lib pango || true
+            ;;
+        pacman)
+            pkg_install nss atk at-spi2-atk libcups libdrm libxkbcommon \
+                        libxcomposite libxdamage libxrandr mesa alsa-lib pango || true
+            ;;
+    esac
+    mark_done "chromium_libs_installed"
+    log "Chromium system libraries installed"
+fi
+
+# ── Step 6: Xvfb (Raspberry Pi only) ─────────────────────────────────────────
+if [ "$IS_PI" = true ]; then
+    if command -v Xvfb &>/dev/null; then
+        skip "Xvfb already installed"
+    else
+        info "Raspberry Pi: installing Xvfb for headless display…"
+        pkg_install xvfb x11vnc || true
+        log "Xvfb installed"
+    fi
+fi
+
+# ── Step 7: Clone or update repo ─────────────────────────────────────────────
 section "Getting ARIA"
 
 if [ -d "$INSTALL_DIR/.git" ]; then
-    info "ARIA directory exists — pulling latest…"
+    info "Repository exists — pulling latest changes…"
     run git -C "$INSTALL_DIR" pull --ff-only
-    log "Repository updated"
+    log "Repository up to date"
+    # Invalidate pip/playwright steps if requirements.txt changed since last install
+    REQS="$INSTALL_DIR/aria/requirements.txt"
+    if [ -f "$REQS" ]; then
+        REQS_HASH=$(md5sum "$REQS" 2>/dev/null | cut -d' ' -f1 || echo "unknown")
+        STORED_HASH=$(grep "^pip_deps:" "$STATE_FILE" 2>/dev/null | cut -d: -f2 || echo "")
+        if [ "$REQS_HASH" != "$STORED_HASH" ]; then
+            info "requirements.txt changed — will reinstall Python deps"
+            clear_step "pip_deps_installed"
+            sed -i "/^pip_deps:/d" "$STATE_FILE" 2>/dev/null || true
+        fi
+    fi
 elif [ -d "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/aria/main.py" ]; then
-    info "ARIA directory found (no git) — skipping clone"
+    info "ARIA files found (no git) — initialising git…"
     run git -C "$INSTALL_DIR" init
-    log "Initialised git in existing directory"
+    log "Git initialised in existing directory"
 else
     info "Cloning ARIA into $INSTALL_DIR…"
     run git clone "$REPO_URL" "$INSTALL_DIR"
     log "Repository cloned"
 fi
 
-# ── Python virtual environment ────────────────────────────────────────────────
-section "Setting up Python environment"
+# ── Step 8: Python virtual environment ───────────────────────────────────────
+section "Python environment"
 
-if [ ! -d "$VENV_DIR" ]; then
+if [ -d "$VENV_DIR" ] && [ -f "$VENV_DIR/bin/python" ]; then
+    skip "Virtual environment already exists at $VENV_DIR"
+else
     info "Creating virtual environment…"
     if ! "$PYTHON" -m venv "$VENV_DIR" >> "$LOG_FILE" 2>&1; then
-        warn "venv creation failed — installing python3-venv / python3-full and retrying…"
-        PYMINOR=$("$PYTHON" -c "import sys; print(sys.version_info.minor)")
+        warn "venv creation failed — retrying after installing dependencies…"
         case "$PKG_MGR" in
             apt)
                 pkg_install "python3.${PYMINOR}-venv" "python3.${PYMINOR}-full" 2>/dev/null || \
                 pkg_install python3-venv python3-full 2>/dev/null || true
                 ;;
-            dnf|pacman)
-                pkg_install python3-venv 2>/dev/null || true
-                ;;
+            dnf|pacman) pkg_install python3-venv 2>/dev/null || true ;;
         esac
         run "$PYTHON" -m venv "$VENV_DIR"
     fi
-    log "Virtual environment created at $VENV_DIR"
-else
-    log "Virtual environment already exists"
+    log "Virtual environment created"
+    # Force pip/playwright reinstall since venv is new
+    clear_step "pip_deps_installed"
+    clear_step "playwright_installed"
+    sed -i "/^pip_deps:/d" "$STATE_FILE" 2>/dev/null || true
 fi
 
 VENV_PYTHON="$VENV_DIR/bin/python"
 VENV_PIP="$VENV_DIR/bin/pip"
 
-info "Upgrading pip…"
+# Always ensure pip itself is up to date (fast, idempotent)
+info "Ensuring pip is up to date…"
 run "$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel
 
-# ── Python dependencies ───────────────────────────────────────────────────────
-section "Installing Python dependencies"
-info "This may take a few minutes on a Raspberry Pi…"
-run "$VENV_PIP" install -r "$INSTALL_DIR/aria/requirements.txt"
-log "Python dependencies installed"
+# ── Step 9: Python dependencies ───────────────────────────────────────────────
+section "Python dependencies"
 
-# ── Playwright + Chromium ─────────────────────────────────────────────────────
-section "Installing Playwright + Chromium"
-info "Downloading Chromium (one-time, ~150 MB)…"
-run "$VENV_PYTHON" -m playwright install chromium
-# Install any remaining OS deps playwright needs
-run "$VENV_PYTHON" -m playwright install-deps chromium 2>/dev/null || true
-log "Playwright + Chromium ready"
+REQS="$INSTALL_DIR/aria/requirements.txt"
+REQS_HASH=$(md5sum "$REQS" 2>/dev/null | cut -d' ' -f1 || echo "unknown")
+STORED_HASH=$(grep "^pip_deps:" "$STATE_FILE" 2>/dev/null | cut -d: -f2 || echo "")
 
-# ── Write launcher script ─────────────────────────────────────────────────────
-section "Writing launcher"
+if step_done "pip_deps_installed" && [ "$REQS_HASH" = "$STORED_HASH" ]; then
+    skip "Python dependencies already installed (requirements.txt unchanged)"
+else
+    info "Installing Python dependencies (this may take a few minutes on a Pi)…"
+    run "$VENV_PIP" install -r "$REQS"
+    clear_step "pip_deps_installed"
+    sed -i "/^pip_deps:/d" "$STATE_FILE" 2>/dev/null || true
+    mark_done "pip_deps_installed"
+    echo "pip_deps:${REQS_HASH}" >> "$STATE_FILE"
+    log "Python dependencies installed"
+fi
+
+# ── Step 10: Playwright + Chromium ───────────────────────────────────────────
+section "Playwright + Chromium"
+
+# Detect if playwright's Chromium is already downloaded.
+# The binary lives under playwright's driver directory.
+PW_CHROMIUM_FOUND=false
+PW_DRIVER=$("$VENV_PYTHON" -c \
+    "import playwright; import os; print(os.path.dirname(playwright.__file__))" \
+    2>/dev/null || echo "")
+if [ -n "$PW_DRIVER" ]; then
+    if find "$PW_DRIVER" -name "chrome" -o -name "chromium" 2>/dev/null | grep -q .; then
+        PW_CHROMIUM_FOUND=true
+    fi
+fi
+
+if step_done "playwright_installed" && [ "$PW_CHROMIUM_FOUND" = true ]; then
+    skip "Playwright + Chromium already downloaded"
+else
+    info "Downloading Playwright Chromium (one-time, ~150 MB)…"
+    run "$VENV_PYTHON" -m playwright install chromium
+    "$VENV_PYTHON" -m playwright install-deps chromium >> "$LOG_FILE" 2>&1 || true
+    mark_done "playwright_installed"
+    log "Playwright + Chromium ready"
+fi
+
+# ── Step 11: Launcher script ──────────────────────────────────────────────────
+section "Launcher"
 
 LAUNCHER="$INSTALL_DIR/aria-start"
-cat > "$LAUNCHER" << EOF
+# Always (re)write the launcher — it's tiny and must stay in sync with paths
+cat > "$LAUNCHER" << LAUNCHEREOF
 #!/usr/bin/env bash
 # ARIA launcher — activates venv and starts the agent
 set -euo pipefail
 cd "$INSTALL_DIR/aria"
 source "$VENV_DIR/bin/activate"
 exec python main.py "\$@"
-EOF
+LAUNCHEREOF
 chmod +x "$LAUNCHER"
 
-# Symlink to /usr/local/bin if writable, otherwise ~/bin
+# Symlink into PATH (idempotent — ln -sf overwrites safely)
 if [ -w /usr/local/bin ]; then
     sudo ln -sf "$LAUNCHER" /usr/local/bin/aria 2>/dev/null || true
-    log "Added 'aria' command to /usr/local/bin"
+    log "'aria' command available at /usr/local/bin/aria"
 else
     mkdir -p "$HOME/.local/bin"
     ln -sf "$LAUNCHER" "$HOME/.local/bin/aria" 2>/dev/null || true
-    log "Added 'aria' command to ~/.local/bin"
-    warn "Make sure ~/.local/bin is in your PATH: export PATH=\"\$HOME/.local/bin:\$PATH\""
+    log "'aria' command available at ~/.local/bin/aria"
+    if ! echo "$PATH" | grep -q "$HOME/.local/bin"; then
+        warn "Add ~/.local/bin to your PATH: export PATH=\"\$HOME/.local/bin:\$PATH\""
+    fi
 fi
 
-# ── Summary before onboarding ─────────────────────────────────────────────────
+# ── All done ──────────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}${GREEN}"
 echo "  ╔══════════════════════════════════════════════╗"
 echo "  ║         Installation complete!              ║"
 echo "  ╚══════════════════════════════════════════════╝"
 echo -e "${NC}"
-echo -e "  ${DIM}Install log: $LOG_FILE${NC}"
+echo -e "  ${DIM}Progress saved to: $STATE_FILE${NC}"
+echo -e "  ${DIM}Full log at:       $LOG_FILE${NC}"
 echo ""
-echo "  Starting the ARIA setup wizard now…"
-echo "  (You will need your Telegram bot token and LLM API key)"
-echo ""
-echo -e "${DIM}  Press Enter to begin, or Ctrl+C to do it later and run: aria --setup${NC}"
-read -r
 
-# ── Launch onboarding wizard ──────────────────────────────────────────────────
-cd "$INSTALL_DIR/aria"
-source "$VENV_DIR/bin/activate"
-exec python main.py --setup
+# Check if ARIA is already configured (has a .env with real tokens)
+ENV_FILE="$INSTALL_DIR/aria/.env"
+ALREADY_CONFIGURED=false
+if [ -f "$ENV_FILE" ] && grep -q "^TELEGRAM_TOKEN=" "$ENV_FILE" && \
+   ! grep -q "your_telegram_bot_token_here" "$ENV_FILE"; then
+    ALREADY_CONFIGURED=true
+fi
+
+if [ "$ALREADY_CONFIGURED" = true ]; then
+    echo "  ARIA is already configured. Start it with:"
+    echo ""
+    echo "    aria"
+    echo ""
+    echo -e "  ${DIM}Re-run setup wizard: aria --setup${NC}"
+else
+    echo "  Starting the ARIA setup wizard now…"
+    echo "  (You will need your Telegram bot token and LLM API key)"
+    echo ""
+    echo -e "${DIM}  Press Enter to begin, or Ctrl+C to skip and run: aria --setup${NC}"
+    read -r
+    cd "$INSTALL_DIR/aria"
+    source "$VENV_DIR/bin/activate"
+    exec python main.py --setup
+fi
