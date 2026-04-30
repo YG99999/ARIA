@@ -43,14 +43,32 @@ def init_scheduler(loop: asyncio.AbstractEventLoop) -> asyncio.Queue:
     return _job_queue
 
 
-def _make_job_callback(description: str):
-    """Return a sync callback that enqueues the task description thread-safely."""
-    def callback():
+class _JobCallback:
+    """Picklable callable for APScheduler jobs.
+
+    APScheduler's SQLAlchemyJobStore serializes jobs with pickle.
+    Closures (inner functions) cannot be pickled — pickle needs a
+    module-level name to reconstruct the object. This class lives at
+    module level so pickle can find it as `scheduler.cron._JobCallback`.
+    The description is stored as an instance attribute and pickled too.
+    """
+
+    def __init__(self, description: str) -> None:
+        self.description = description
+
+    def __call__(self) -> None:
         if _loop and _job_queue:
-            _loop.call_soon_threadsafe(_job_queue.put_nowait, description)
+            _loop.call_soon_threadsafe(_job_queue.put_nowait, self.description)
         else:
-            logger.error("Scheduler callback: loop or queue not initialized")
-    return callback
+            logger.error("Scheduler callback: loop or queue not initialized (desc=%s)", self.description)
+
+    def __repr__(self) -> str:
+        return f"_JobCallback({self.description!r})"
+
+
+def _make_job_callback(description: str) -> "_JobCallback":
+    """Return a picklable callback that enqueues the task description thread-safely."""
+    return _JobCallback(description)
 
 
 class CronScheduler:
