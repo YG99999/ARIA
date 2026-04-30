@@ -51,27 +51,71 @@ def _step_telegram() -> dict[str, str]:
     return {"TELEGRAM_TOKEN": token, "TELEGRAM_CHAT_ID": chat_id}
 
 
-def _step_llm() -> dict[str, str]:
+def _step_llm() -> tuple[dict[str, str], str]:
+    """Returns (env_values, model_id)."""
     print("\n[2/7] LLM API configuration")
+    print("  Works with any OpenAI-compatible endpoint:")
+    print("    OpenRouter  → https://openrouter.ai/api/v1")
+    print("    Anthropic   → https://api.anthropic.com/v1")
+    print("    Ollama      → http://localhost:11434/v1")
+    print("    NVIDIA, etc → use their OpenAI-compatible URL")
     base_url = _prompt("  API base URL", default="https://openrouter.ai/api/v1")
     api_key = _prompt("  API key", secret=True)
-    return {"LLM_BASE_URL": base_url, "LLM_API_KEY": api_key}
+    print()
+    print("  Enter the model ID for the main orchestrator.")
+    print("  This is the model that runs ARIA's reasoning, planning, and agents.")
+    print("  Examples:")
+    print("    anthropic/claude-sonnet-4-5   (OpenRouter)")
+    print("    anthropic/claude-3-5-sonnet-20241022  (direct Anthropic)")
+    print("    gpt-4o                        (OpenAI)")
+    print("    llama3.2                      (Ollama)")
+    model_id = _prompt("  Orchestrator model ID")
+    while not model_id.strip():
+        print("  Model ID is required.")
+        model_id = _prompt("  Orchestrator model ID")
+    return {"LLM_BASE_URL": base_url, "LLM_API_KEY": api_key}, model_id.strip()
 
 
-async def _test_llm(base_url: str, api_key: str) -> bool:
+async def _test_llm(base_url: str, api_key: str, model_id: str) -> bool:
     try:
         from openai import AsyncOpenAI
         client = AsyncOpenAI(base_url=base_url, api_key=api_key)
         resp = await client.chat.completions.create(
-            model="anthropic/claude-haiku-4-5",
-            messages=[{"role": "user", "content": "Reply with OK"}],
-            max_tokens=5,
+            model=model_id,
+            messages=[{"role": "user", "content": "Reply with the single word OK"}],
+            max_tokens=10,
         )
         text = resp.choices[0].message.content or ""
-        return "ok" in text.lower()
+        return len(text.strip()) > 0  # any non-empty reply = success
     except Exception as exc:
         print(f"  LLM test failed: {exc}")
         return False
+
+
+def _write_initial_models_yaml(model_id: str) -> None:
+    """Write models.yaml with just the orchestrator model.
+
+    ARIA will ask the user about sub-agent models on first run.
+    """
+    content = f"""# Model configuration — managed by ARIA
+# ARIA asked you about sub-agent models on first startup.
+# Edit directly or tell ARIA to update it.
+
+models:
+  - id: {model_id}
+    tier: heavy
+    good_for: "all tasks — orchestrator model"
+    compress_at: 100000
+    context_limit: 128000
+
+budget:
+  daily_usd_alert: 2.00
+  daily_usd_hard_stop: 10.00
+  monthly_usd_hard_stop: 50.00
+"""
+    models_path = _ARIA_ROOT / "config" / "models.yaml"
+    models_path.write_text(content, encoding="utf-8")
+    print(f"  Saved orchestrator model: {model_id}")
 
 
 def _step_user_facts() -> dict[str, str]:
@@ -195,28 +239,31 @@ def run_wizard() -> None:
     user_facts: dict[str, str] = {}
 
     env_values.update(_step_telegram())
-    llm_config = _step_llm()
+    llm_config, model_id = _step_llm()
     env_values.update(llm_config)
 
-    # Test LLM connectivity
-    print("  Testing LLM connectivity…", end=" ", flush=True)
-    ok = asyncio.run(_test_llm(llm_config["LLM_BASE_URL"], llm_config["LLM_API_KEY"]))
+    # Test LLM connectivity with the user's chosen model
+    print(f"  Testing connection to {model_id}…", end=" ", flush=True)
+    ok = asyncio.run(_test_llm(llm_config["LLM_BASE_URL"], llm_config["LLM_API_KEY"], model_id))
     if ok:
-        print("OK")
+        print("OK ✓")
     else:
         print("FAILED")
         print()
         print("  Common fixes:")
-        print("  • Wrong base URL — for OpenRouter use: https://openrouter.ai/api/v1")
+        print("  • Wrong base URL — double-check your provider's OpenAI-compatible endpoint")
         print("  • Wrong API key — copy it fresh from your provider dashboard")
-        print("  • NVIDIA / other endpoints may not support the test model")
-        print("    (anthropic/claude-haiku-4-5). ARIA will still work if your")
-        print("    models.yaml uses a model that endpoint actually has.")
+        print("  • Wrong model ID — check exact spelling on your provider's model list")
         print()
         cont = _prompt("  Continue anyway? (y/n)", default="y")
         if cont.lower() == "n":
             print("  Re-run setup with: python aria/main.py --setup")
             sys.exit(0)
+
+    # Write models.yaml with just the orchestrator model.
+    # ARIA will ask about sub-agent models on first Telegram startup.
+    print("\n[2b/7] Writing model configuration")
+    _write_initial_models_yaml(model_id)
 
     user_facts.update(_step_user_facts())
     ux_mode = _step_ux_mode()

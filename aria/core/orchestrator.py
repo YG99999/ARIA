@@ -78,6 +78,10 @@ class Orchestrator:
                 f"Say 'retry [title]' to requeue any of them.",
             )
 
+        # First-run: ask about sub-agent models if not yet configured
+        await self._maybe_ask_about_models()
+
+
         while self._running:
             try:
                 self._last_tick_time = time.time()
@@ -190,6 +194,10 @@ class Orchestrator:
 
         text = msg.text
         await journal_log("message_in", text)
+
+        # Check if this is a reply to the first-run model onboarding question
+        if await self._handle_models_onboarding_reply(text):
+            return  # consumed — don't route as a normal message
 
         # Detect "continue from last time" — inject active session context
         if is_continuation_request(text):
@@ -816,6 +824,173 @@ class Orchestrator:
             self._last_budget_date = today
             reset_for_new_day()
             self._budget_exceeded = False
+
+    # ------------------------------------------------------------------
+    # First-run model onboarding
+    # ------------------------------------------------------------------
+
+    async def _maybe_ask_about_models(self) -> None:
+        """On first startup, ask user if they want to add sub-agent models.
+
+        Fires once — after the user replies, the response is parsed with the LLM
+        and models.yaml is updated. The fact 'models_onboarding_done' is set so
+        this never fires again.
+        """
+        try:
+            from memory.facts import FactsStore
+            done = await FactsStore.get("models_onboarding_done")
+            if done:
+                return
+        except Exception:
+            return
+
+        try:
+            from tg.notify import send_text
+            model_id = settings.get_model("heavy")
+            msg = (
+                f"👋 ARIA is ready!\n\n"
+                f"I'm currently using **{model_id}** for everything — all reasoning, "
+                f"planning, browsing, and shell tasks.\n\n"
+                f"Would you like to add more models for specific tasks? "
+                f"For example, a faster/cheaper model for simple routing and summaries, "
+                f"or a specialised model for coding.\n\n"
+                f"Just describe each one — tell me the model ID and what it's good and bad at. "
+                f"I'll configure them automatically.\n\n"
+                f"Or reply **skip** to use {model_id} for everything."
+            )
+            await send_text(settings.telegram_chat_id, msg, parse_mode="Markdown")
+
+            # Flag that we've sent the question — the reply will be handled by
+            # the normal message handler which checks this pending flag
+            try:
+                from memory.facts import FactsStore
+                await FactsStore.upsert("models_onboarding_pending", "1", source="aria")
+            except Exception:
+                pass
+        except Exception:
+            logger.debug("_maybe_ask_about_models failed", exc_info=True)
+
+    async def _handle_models_onboarding_reply(self, text: str) -> bool:
+        """Called from _handle_message when models_onboarding_pending==1.
+
+        Returns True if the message was consumed as an onboarding reply.
+        """
+        try:
+            from memory.facts import FactsStore
+            pending = await FactsStore.get("models_onboarding_pending")
+            if pending != "1":
+                return False
+        except Exception:
+            return False
+
+        try:
+            from tg.notify import send_text
+            from core.llm_client import llm_call
+            from openai import AsyncOpenAI
+            import yaml
+            from pathlib import Path
+
+            # Clear the pending flag first
+            await FactsStore.upsert("models_onboarding_pending", "0", source="aria")
+            await FactsStore.upsert("models_onboarding_done", "1", source="aria")
+
+            if text.strip().lower() in ("skip", "no", "nope", "n", "no thanks"):
+                await send_text(
+                    settings.telegram_chat_id,
+                    f"Got it — using {settings.get_model('heavy')} for everything. "
+                    f"You can add more models any time by saying "
+                    f"\"add a model\" or editing config/models.yaml.",
+                )
+                return True
+
+            # Ask the LLM to parse the user's model descriptions into structured yaml
+            client = AsyncOpenAI(
+                base_url=settings.llm_base_url,
+                api_key=settings.llm_api_key,
+            )
+            existing_model = settings.get_model("heavy")
+
+            parse_prompt = f"""The user wants to configure additional AI models for ARIA.
+Current orchestrator model: {existing_model} (tier: heavy)
+
+User's description:
+{text}
+
+Parse this into a YAML models list. Each model needs:
+  - id: (exact model ID the user gave)
+  - tier: light (for fast/cheap models) or heavy (for capable models)
+  - good_for: short description of strengths (quoted string)
+  - compress_at: 100000
+  - context_limit: 128000
+
+Rules:
+- If the user describes a model as fast, cheap, small, or for simple tasks → tier: light
+- If the user describes it as smart, capable, for complex tasks → tier: heavy
+- The existing model {existing_model} is already configured — do NOT include it again
+- Output ONLY valid YAML for the models list (just the list items, no outer key)
+- If you cannot parse any valid models, output exactly: NONE
+
+Example output:
+- id: meta-llama/llama-3.1-8b-instruct
+  tier: light
+  good_for: "fast routing, summaries, simple Q&A"
+  compress_at: 100000
+  context_limit: 128000"""
+
+            response = await llm_call(
+                client,
+                model=existing_model,
+                messages=[{"role": "user", "content": parse_prompt}],
+                max_tokens=500,
+            )
+            parsed = (response.choices[0].message.content or "").strip()
+
+            if parsed.upper() == "NONE" or not parsed:
+                await send_text(
+                    settings.telegram_chat_id,
+                    "I couldn't parse any model details from that. "
+                    "You can add models later by saying \"add model [id] — good for [description]\".",
+                )
+                return True
+
+            # Load existing models.yaml and append new models
+            models_path = Path(settings.aria_root) / "config" / "models.yaml"
+            existing = yaml.safe_load(models_path.read_text(encoding="utf-8")) or {}
+            existing_models = existing.get("models", [])
+
+            try:
+                new_models = yaml.safe_load(parsed)
+                if isinstance(new_models, list):
+                    existing_models.extend(new_models)
+                    existing["models"] = existing_models
+                    models_path.write_text(
+                        yaml.dump(existing, default_flow_style=False, allow_unicode=True),
+                        encoding="utf-8",
+                    )
+                    settings.reload_models()
+
+                    names = ", ".join(m.get("id", "?") for m in new_models)
+                    await send_text(
+                        settings.telegram_chat_id,
+                        f"✅ Added {len(new_models)} model(s): {names}\n\n"
+                        f"I'll use lighter models for fast tasks and the orchestrator "
+                        f"for anything complex. You can see the config in config/models.yaml.",
+                    )
+                else:
+                    raise ValueError("not a list")
+            except Exception as e:
+                logger.debug("Model yaml parse failed: %s\nRaw: %s", e, parsed)
+                await send_text(
+                    settings.telegram_chat_id,
+                    "I had trouble parsing the model config. "
+                    "You can edit config/models.yaml directly or try again.",
+                )
+
+            return True
+
+        except Exception:
+            logger.exception("_handle_models_onboarding_reply failed")
+            return False
 
     # ------------------------------------------------------------------
     # Watchdog
