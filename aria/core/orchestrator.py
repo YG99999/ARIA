@@ -379,13 +379,34 @@ class Orchestrator:
     # Streaming conversational response
     # ------------------------------------------------------------------
 
+    async def _build_conversational_system_prompt(self, message: str) -> str:
+        """Stripped-down system prompt for conversational replies.
+
+        Omits tool descriptions on purpose — the conversational streaming call
+        does not pass tools= to the API, so the model would output tool-call
+        reasoning as plain text if it sees tool descriptions. Memory and persona
+        are still included.
+        """
+        persona_path = settings.aria_root / "config" / "persona.md"
+        persona = persona_path.read_text(encoding="utf-8") if persona_path.exists() else ""
+
+        memory_context = ""
+        try:
+            from memory.retriever import MemoryRetriever
+            memory_context = await MemoryRetriever.build_context(message)
+        except ImportError:
+            pass
+
+        parts = [SECURITY_BLOCK, persona, memory_context]
+        return "\n\n".join(p for p in parts if p)
+
     async def _stream_conversational_response(self, text: str, msg: Any) -> None:
-        from openai import AsyncOpenAI
         from tg.notify import send_text
         from system.journal import log as journal_log
         from core.llm_client import get_client, _record_usage
 
-        system_prompt = await self._build_system_prompt(text)
+        # Use conversational prompt — no tool descriptions to avoid reasoning bleed
+        system_prompt = await self._build_conversational_system_prompt(text)
         client = get_client()
 
         # Send initial placeholder
@@ -419,7 +440,7 @@ class Orchestrator:
                     if sent_msg and now - last_edit > 1.0:
                         try:
                             await self._bot.app.bot.edit_message_text(
-                                buffer + "▌",
+                                (buffer + "▌")[:4096],
                                 settings.telegram_chat_id,
                                 sent_msg.message_id,
                             )
@@ -427,18 +448,22 @@ class Orchestrator:
                         except Exception:
                             pass
 
-            # Final edit — remove cursor
+            # Final edit — remove cursor, truncate to Telegram limit
             if sent_msg and buffer:
                 try:
                     await self._bot.app.bot.edit_message_text(
-                        buffer,
+                        buffer[:4096],
                         settings.telegram_chat_id,
                         sent_msg.message_id,
                     )
+                    # If response was longer than 4096, send the rest as follow-up
+                    if len(buffer) > 4096:
+                        for i in range(4096, len(buffer), 4096):
+                            await send_text(settings.telegram_chat_id, buffer[i:i+4096])
                 except Exception:
-                    await send_text(settings.telegram_chat_id, buffer)
+                    await send_text(settings.telegram_chat_id, buffer[:4096])
             elif buffer:
-                await send_text(settings.telegram_chat_id, buffer)
+                await send_text(settings.telegram_chat_id, buffer[:4096])
 
             await journal_log("message_out", buffer[:500])
 
@@ -865,16 +890,30 @@ class Orchestrator:
             logger.debug("_maybe_ask_about_models failed", exc_info=True)
 
     async def _handle_models_onboarding_reply(self, text: str) -> bool:
-        """Called from _handle_message when models_onboarding_pending==1.
+        """Called from _handle_message when models_onboarding_pending==1,
+        OR when the user sends a JSON block containing a 'models' array.
 
-        Returns True if the message was consumed as an onboarding reply.
+        Returns True if the message was consumed as a model-config reply.
         """
+        import re as _re
         try:
             from memory.facts import FactsStore
             pending = await FactsStore.get("models_onboarding_pending")
-            if pending != "1":
-                return False
         except Exception:
+            return False
+
+        # Also catch direct JSON model configs sent at any time
+        is_model_json = False
+        try:
+            json_match = _re.search(r'\{[\s\S]*?"models"[\s\S]*?\}', text)
+            if json_match:
+                _data = json.loads(json_match.group())
+                if isinstance(_data.get("models"), list) and _data["models"]:
+                    is_model_json = True
+        except Exception:
+            pass
+
+        if pending != "1" and not is_model_json:
             return False
 
         try:

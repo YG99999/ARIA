@@ -49,6 +49,54 @@ search_web is 10× faster than browser.
 Reply with ONLY valid JSON. No explanation."""
 
 
+def _keyword_classify(message: str) -> dict:
+    """Fast keyword-based fallback classification when the LLM router fails.
+
+    Not as smart as the LLM router but ensures tasks get dispatched
+    instead of silently falling through to conversation mode.
+    """
+    lower = message.lower()
+
+    # Browser signals
+    browser_words = [
+        "open", "navigate", "browse", "website", "url", "http", "login",
+        "sign in", "click", "fill", "form", "download from", "scrape",
+        "check", "look up", "search for", "find on", "google",
+    ]
+    # Shell / code / system signals
+    shell_words = [
+        "install", "run", "execute", "script", "file", "folder", "directory",
+        "write", "create", "delete", "move", "copy", "edit", "code", "program",
+        "python", "bash", "shell", "command", "package", "pip", "apt", "git",
+        "build", "compile", "test", "fix", "debug", "deploy", "server",
+        "process", "service", "update", "upgrade", "configure", "setup",
+    ]
+
+    browser_score = sum(1 for w in browser_words if w in lower)
+    shell_score = sum(1 for w in shell_words if w in lower)
+
+    if shell_score > browser_score and shell_score > 0:
+        return {
+            "kind": "shell",
+            "mode": "dev_mode" if any(w in lower for w in ("code", "python", "script", "fix", "debug", "write", "build")) else "research_mode",
+            "title": message[:60],
+            "complexity": "simple",
+        }
+    if browser_score > 0:
+        return {
+            "kind": "browser",
+            "mode": "browser_mode",
+            "title": message[:60],
+            "complexity": "simple",
+        }
+    return {
+        "kind": "conversation",
+        "mode": "conversation",
+        "title": message[:60],
+        "complexity": "simple",
+    }
+
+
 async def classify(message: str) -> dict:
     """Classify a message and return routing info."""
     try:
@@ -62,13 +110,15 @@ async def classify(message: str) -> dict:
             temperature=0.0,
             record_usage=False,  # Don't count router calls toward usage tracking
         )
-        raw = response.choices[0].message.content or "{}"
+        raw = (response.choices[0].message.content or "").strip()
         # Strip markdown code fences if present
-        raw = raw.strip()
         if raw.startswith("```"):
-            raw = raw.split("```")[1]
+            raw = raw.split("```", 2)[1]
             if raw.startswith("json"):
                 raw = raw[4:]
+            raw = raw.strip()
+        if not raw:
+            raise ValueError("empty router response — using keyword fallback")
         result = json.loads(raw)
         # Validate required fields
         result.setdefault("kind", "conversation")
@@ -77,13 +127,8 @@ async def classify(message: str) -> dict:
         result.setdefault("complexity", "simple")
         return result
     except Exception:
-        logger.warning("Router classification failed — defaulting to conversation", exc_info=True)
-        return {
-            "kind": "conversation",
-            "mode": "conversation",
-            "title": message[:60],
-            "complexity": "simple",
-        }
+        logger.warning("Router LLM failed — using keyword fallback", exc_info=True)
+        return _keyword_classify(message)
 
 
 _DECOMPOSE_SYSTEM = """You are a task planner for an AI agent system.
