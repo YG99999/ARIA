@@ -227,7 +227,7 @@ async def browse(
         except ImportError:
             return (
                 "browser-use not installed. "
-                "Run: pip install browser-use==0.1.40 playwright==1.47.0"
+                "Run: pip install browser-use==0.1.40 playwright==1.49.0"
             )
 
         try:

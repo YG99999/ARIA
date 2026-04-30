@@ -234,16 +234,19 @@ if step_done "chromium_libs_installed"; then
 else
     case "$PKG_MGR" in
         apt)
+            # Base deps — no libasound variant here, handled separately below
             CHROMIUM_DEPS=(
                 libnspr4 libnss3 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0
                 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1
                 libxfixes3 libxrandr2 libgbm1 libxshmfence1
-                libasound2 libpango-1.0-0 libpangocairo-1.0-0
+                libpango-1.0-0 libpangocairo-1.0-0
                 fonts-liberation xdg-utils
             )
-            # libasound2 was renamed on Debian 12+
-            pkg_install "${CHROMIUM_DEPS[@]}" 2>/dev/null || \
-            pkg_install libasound2t64 "${CHROMIUM_DEPS[@]:1}" 2>/dev/null || true
+            pkg_install "${CHROMIUM_DEPS[@]}" 2>/dev/null || true
+            # libasound2 was renamed to libasound2t64 on Ubuntu 24.04 / Debian 12+
+            # Try the new name first, fall back to the old name
+            pkg_install libasound2t64 2>/dev/null || \
+            pkg_install libasound2    2>/dev/null || true
             ;;
         dnf)
             pkg_install nss atk at-spi2-atk cups-libs libdrm libxkbcommon \

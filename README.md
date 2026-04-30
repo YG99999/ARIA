@@ -356,7 +356,7 @@ aria/
 | Package | Version | Note |
 |---------|---------|------|
 | `browser-use` | `==0.1.40` | Do not auto-update — minor bumps have broken the Agent API |
-| `playwright` | `==1.47.0` | Matched to browser-use |
+| `playwright` | `==1.49.0` | Minimum required by browser-use 0.1.40 |
 | `playwright-stealth` | `==1.0.6` | Applied at context level only — per-page API broken in this version |
 | `apscheduler` | `==3.10.4` | Uses BackgroundScheduler (not AsyncIOScheduler) to avoid blocking the event loop |
 
