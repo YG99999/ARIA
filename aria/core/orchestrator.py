@@ -195,7 +195,16 @@ class Orchestrator:
         text = msg.text
         await journal_log("message_in", text)
 
-        # Check if this is a reply to the first-run model onboarding question
+        # Check if this is a model config message — JSON blob OR natural language add/update
+        _lower = text.lower()
+        _is_model_request = any(p in _lower for p in (
+            "add model", "add a model", "configure model", "setup model",
+            "set up model", "new model", "update models", "change model",
+            "add subagent", "add sub-agent", "add agent model",
+        ))
+        if _is_model_request:
+            from memory.facts import FactsStore
+            await FactsStore.upsert("models_onboarding_pending", "1", source="aria")
         if await self._handle_models_onboarding_reply(text):
             return  # consumed — don't route as a normal message
 
