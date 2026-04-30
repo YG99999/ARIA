@@ -94,9 +94,24 @@ def _step_ux_mode() -> str:
     return "expert" if choice.lower() == "y" else "beginner"
 
 
+def _is_wsl() -> bool:
+    """Detect Windows Subsystem for Linux."""
+    try:
+        with open("/proc/version", "r") as f:
+            return "microsoft" in f.read().lower()
+    except OSError:
+        return False
+
+
 def _step_linux_setup() -> None:
     if sys.platform == "win32":
         print("\n[5/7] Linux setup — skipped (Windows detected)")
+        return
+
+    if _is_wsl():
+        print("\n[5/7] Linux system setup — WSL detected")
+        print("  WSL note: aria-agent system user and systemd are not supported in WSL.")
+        print("  Start ARIA manually with: aria  (or: python aria/main.py)")
         return
 
     print("\n[5/7] Linux system setup")
@@ -105,7 +120,7 @@ def _step_linux_setup() -> None:
     ret = os.system("id aria-agent > /dev/null 2>&1")
     if ret != 0:
         print("  Creating aria-agent system user…")
-        os.system("useradd -r -s /bin/bash aria-agent")
+        os.system("sudo useradd -r -s /bin/bash aria-agent")
     else:
         print("  aria-agent user already exists")
 
@@ -113,7 +128,7 @@ def _step_linux_setup() -> None:
     install = _prompt("  Install noVNC + x11vnc for remote takeover? (y/n)", default="n")
     if install.lower() == "y":
         print("  Installing packages…")
-        os.system("apt-get install -y x11vnc novnc xvfb > /dev/null 2>&1")
+        os.system("sudo apt-get install -y x11vnc novnc xvfb > /dev/null 2>&1")
         print("  Done. Configure x11vnc password separately with: x11vnc -storepasswd")
 
     # systemd service
@@ -131,7 +146,7 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
+User={os.environ.get('USER', 'root')}
 WorkingDirectory={aria_root}
 ExecStart={python_path} {aria_root / 'main.py'}
 Restart=on-failure
@@ -142,10 +157,13 @@ Environment=PYTHONUNBUFFERED=1
 WantedBy=multi-user.target
 """
     service_path = Path("/etc/systemd/system/aria.service")
-    service_path.write_text(service_content, encoding="utf-8")
-    os.system("systemctl daemon-reload")
-    os.system("systemctl enable aria.service")
-    print(f"  Installed {service_path}. Start with: systemctl start aria")
+    tmp_path = Path(f"/tmp/aria.service")
+    tmp_path.write_text(service_content, encoding="utf-8")
+    ret = os.system(f"sudo cp {tmp_path} {service_path} && sudo systemctl daemon-reload && sudo systemctl enable aria.service")
+    if ret == 0:
+        print(f"  Installed {service_path}. Start with: sudo systemctl start aria")
+    else:
+        print(f"  Could not install systemd service (no sudo?). Start ARIA manually with: aria")
 
 
 def _step_git_init() -> None:
@@ -183,7 +201,22 @@ def run_wizard() -> None:
     # Test LLM connectivity
     print("  Testing LLM connectivity…", end=" ", flush=True)
     ok = asyncio.run(_test_llm(llm_config["LLM_BASE_URL"], llm_config["LLM_API_KEY"]))
-    print("OK" if ok else "FAILED (check your API key and base URL)")
+    if ok:
+        print("OK")
+    else:
+        print("FAILED")
+        print()
+        print("  Common fixes:")
+        print("  • Wrong base URL — for OpenRouter use: https://openrouter.ai/api/v1")
+        print("  • Wrong API key — copy it fresh from your provider dashboard")
+        print("  • NVIDIA / other endpoints may not support the test model")
+        print("    (anthropic/claude-haiku-4-5). ARIA will still work if your")
+        print("    models.yaml uses a model that endpoint actually has.")
+        print()
+        cont = _prompt("  Continue anyway? (y/n)", default="y")
+        if cont.lower() == "n":
+            print("  Re-run setup with: python aria/main.py --setup")
+            sys.exit(0)
 
     user_facts.update(_step_user_facts())
     ux_mode = _step_ux_mode()
